@@ -1,0 +1,750 @@
+import AVFoundation
+import AppKit
+import UniveEngineKit
+import SwiftUI
+
+/// v2 settings: a section list on the left, one section at a time on the right.
+struct SettingsView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(Localizer.self) private var L
+
+    var body: some View {
+        @Bindable var model = model
+        HStack(spacing: 0) {
+            SectionNav(selection: $model.settingsSection)
+            ScrollView {
+                Group {
+                    switch model.settingsSection {
+                    case .general: GeneralSection()
+                    case .engine: EngineSection()
+                    case .dx12: D3DMetalSetupPanel()
+                    case .disks: DisksSection()
+                    case .about: AboutSection()
+                    }
+                }
+                .id(model.settingsSection)
+                .frame(maxWidth: 640, alignment: .leading)
+                .padding(.top, 112)
+                .padding(.horizontal, 56)
+                .padding(.bottom, Theme.Spacing.xl)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .scrollIndicators(.automatic)
+        }
+        .background(Theme.Palette.background)
+    }
+}
+
+private struct SectionNav: View {
+    @Binding var selection: SettingsSection
+    @Environment(AppModel.self) private var model
+    @Environment(Localizer.self) private var L
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(L("rail.settings"))
+                .font(Theme.Font.display)
+                .foregroundStyle(Theme.Palette.textPrimary)
+                .padding(.leading, 12)
+                .padding(.bottom, 16)
+                .accessibilityAddTraits(.isHeader)
+            row(.general, "globe", L("settings.section.general"))
+            row(.engine, "cpu", L("settings.section.engine"), flag: !model.hasEngine && !model.isDemo)
+            row(.dx12, "square.stack.3d.up", L("settings.section.dx12"), flag: !model.d3dMetalReady)
+            row(.disks, "externaldrive", L("settings.section.disks"))
+            row(.about, "info.circle", L("settings.section.about"), flag: model.availableUpdate != nil)
+            Spacer(minLength: 0)
+        }
+        .padding(.top, Theme.Layout.pageTitleTop)
+        .padding(.horizontal, Theme.Spacing.md)
+        .frame(width: 240)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .overlay(alignment: .trailing) { Rectangle().fill(Theme.Palette.border).frame(width: 1) }
+    }
+
+    private func row(_ section: SettingsSection, _ symbol: String, _ title: String, flag: Bool = false) -> some View {
+        SectionNavRow(symbol: symbol, title: title, isSelected: selection == section, flag: flag,
+                      flagLabel: L("settings.dx12.needsSetup")) { selection = section }
+    }
+}
+
+private struct SectionNavRow: View {
+    let symbol: String
+    let title: String
+    let isSelected: Bool
+    let flag: Bool
+    let flagLabel: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: symbol).font(.system(size: 15))
+                    .foregroundStyle(isSelected ? Theme.Palette.accent : (hovering ? Theme.Palette.textPrimary : Theme.Palette.textSecondary))
+                    .frame(width: 18)
+                Text(title).font(.system(size: 13, weight: isSelected ? .semibold : .medium))
+                    .foregroundStyle(isSelected || hovering ? Theme.Palette.textPrimary : Theme.Palette.textSecondary)
+                Spacer(minLength: 0)
+                if flag {
+                    Circle().fill(Theme.Palette.warning).frame(width: 8, height: 8)
+                        .accessibilityLabel(flagLabel)
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 40)
+            .background(isSelected || hovering ? Theme.Palette.card : .clear, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(Theme.Motion.quick, value: hovering)
+        .animation(Theme.Motion.quick, value: isSelected)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+private struct SectionTitle: View {
+    let text: String
+    var body: some View {
+        Text(text).font(Theme.Font.title).foregroundStyle(Theme.Palette.textPrimary).accessibilityAddTraits(.isHeader)
+    }
+}
+
+// MARK: General
+
+/// Settings › Disks: external disks and the drive letter each has in Windows, so games can be installed on them and
+/// installers see their real free space.
+private struct DisksSection: View {
+    @Environment(AppModel.self) private var model
+    @Environment(Localizer.self) private var L
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(L("disks.title")).font(Theme.Font.title).foregroundStyle(Theme.Palette.textPrimary)
+                Text(L("disks.subtitle")).font(Theme.Font.caption).foregroundStyle(Theme.Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                row(symbol: "laptopcomputer", name: L("disks.thisMac"), detail: L("disks.thisMac.detail"), trailing: Text(verbatim: "Z:")
+                    .font(Theme.Font.mono).foregroundStyle(Theme.Palette.textSecondary))
+                ForEach(model.disks) { disk in
+                    Rectangle().fill(Theme.Palette.border).frame(height: 1)
+                    row(symbol: "externaldrive", name: disk.name, detail: detail(disk), warning: warning(disk), trailing: picker(disk))
+                }
+                if model.disks.isEmpty {
+                    Rectangle().fill(Theme.Palette.border).frame(height: 1)
+                    Text(L("disks.none")).font(Theme.Font.caption).foregroundStyle(Theme.Palette.textSecondary)
+                }
+            }
+            .padding(Theme.Spacing.md)
+            .background(Theme.Palette.card, in: RoundedRectangle(cornerRadius: Theme.Radius.lg))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.lg).strokeBorder(Theme.Palette.border))
+            Text(L("disks.help")).font(Theme.Font.caption).foregroundStyle(Theme.Palette.textSecondary)
+                .lineSpacing(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .onAppear { model.refreshDisks() }
+    }
+
+    private func row(symbol: String, name: String, detail: String, warning: String? = nil, trailing: some View) -> some View {
+        HStack(spacing: Theme.Spacing.md) {
+            Image(systemName: symbol).font(.system(size: 18)).foregroundStyle(Theme.Palette.textSecondary).frame(width: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(verbatim: name).font(Theme.Font.body).foregroundStyle(Theme.Palette.textPrimary)
+                Text(detail).font(Theme.Font.caption).foregroundStyle(Theme.Palette.textSecondary)
+                if let warning {
+                    Label(warning, systemImage: "exclamationmark.triangle.fill").font(Theme.Font.caption)
+                        .foregroundStyle(Theme.Palette.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+            trailing
+        }
+    }
+
+    /// "357 GB free of 512 GB · ExFAT".
+    private func detail(_ disk: ExternalDrives.Disk) -> String {
+        var parts: [String] = []
+        if let free = disk.available, let total = disk.capacity {
+            parts.append(L("disks.space", ByteCountFormatter.string(fromByteCount: free, countStyle: .file),
+                           ByteCountFormatter.string(fromByteCount: total, countStyle: .file)))
+        }
+        if let format = disk.format { parts.append(format) }
+        return parts.joined(separator: " · ")
+    }
+
+    private func warning(_ disk: ExternalDrives.Disk) -> String? {
+        guard disk.readOnly else { return nil }
+        return L(disk.format == "NTFS" ? "disks.ntfs" : "disks.readOnly")
+    }
+
+    private func picker(_ disk: ExternalDrives.Disk) -> some View {
+        Picker("", selection: Binding(get: { model.driveLetter(disk) ?? "" },
+                                      set: { model.setDriveLetter($0.isEmpty ? nil : $0, for: disk) })) {
+            Text(L("disks.hidden")).tag("")
+            ForEach(model.availableLetters(for: disk), id: \.self) { Text(verbatim: $0).tag($0) }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .fixedSize()
+        .accessibilityLabel(L("disks.letter", disk.name))
+    }
+}
+
+private struct GeneralSection: View {
+    @Environment(Localizer.self) private var L
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        @Bindable var L = L
+        VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+            SectionTitle(text: L("settings.section.general")).enterOnAppear()
+            VStack(alignment: .leading, spacing: 10) {
+                Text(L("settings.language")).font(Theme.Font.section).foregroundStyle(Theme.Palette.textPrimary)
+                SegmentedPicker(options: AppLanguage.allCases, selection: $L.language,
+                                label: { $0 == .system ? L("settings.language.system") : $0.nativeName },
+                                segmentHeight: 28, fontSize: 13, fillsWidth: true, accessibilityTitle: L("settings.language"))
+                    .frame(width: 420)
+                Text(L("settings.language.v2help")).font(Theme.Font.caption).foregroundStyle(Theme.Palette.textSecondary)
+            }
+            .enterOnAppear(delay: 0.06)
+            VStack(alignment: .leading, spacing: 10) {
+                Text(L("settings.data")).font(Theme.Font.section).foregroundStyle(Theme.Palette.textPrimary)
+                HStack(spacing: Theme.Spacing.md) {
+                    Text(AppPaths.home.path).font(Theme.Font.mono).foregroundStyle(Theme.Palette.textSecondary)
+                        .textSelection(.enabled).lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 0)
+                    Button(L("settings.openFolder")) {
+                        try? FileManager.default.createDirectory(at: AppPaths.home, withIntermediateDirectories: true)
+                        NSWorkspace.shared.open(AppPaths.home)
+                    }
+                    .buttonStyle(SecondaryButtonStyle(height: 34, horizontalPadding: 14))
+                }
+            }
+            .enterOnAppear(delay: 0.12)
+            ControllersCard().enterOnAppear(delay: 0.18)
+            MicrophoneCard().enterOnAppear(delay: 0.22)
+            MacIntegrationCard().enterOnAppear(delay: 0.26)
+            SaveBackupSettingsCard().enterOnAppear(delay: 0.3)
+        }
+    }
+}
+
+/// Settings › General: the pads the Mac sees and the PlayStation-as-Xbox switch.
+private struct ControllersCard: View {
+    @Environment(AppModel.self) private var model
+    @Environment(Localizer.self) private var L
+
+    var body: some View {
+        @Bindable var model = model
+        VStack(alignment: .leading, spacing: 10) {
+            Text(L("controllers.title")).font(Theme.Font.section).foregroundStyle(Theme.Palette.textPrimary)
+            VStack(alignment: .leading, spacing: 12) {
+                if model.controllers.isEmpty {
+                    Text(L("controllers.none")).font(Theme.Font.caption).foregroundStyle(Theme.Palette.textSecondary)
+                } else {
+                    ForEach(model.controllers) { pad in
+                        HStack(spacing: 10) {
+                            Image(systemName: "gamecontroller.fill").foregroundStyle(Theme.Palette.textSecondary)
+                            Text(pad.name).font(Theme.Font.body).foregroundStyle(Theme.Palette.textPrimary)
+                            Text(L("controllers.kind.\(pad.kind.rawValue)")).font(Theme.Font.caption)
+                                .foregroundStyle(Theme.Palette.textSecondary)
+                            Spacer(minLength: 0)
+                            if pad.kind == .playStation {
+                                Text(L(model.playStationAsXbox ? "controllers.seenAsXbox" : "controllers.seenAsPlayStation"))
+                                    .font(Theme.Font.caption).foregroundStyle(Theme.Palette.textTertiary)
+                            }
+                        }
+                    }
+                }
+                Rectangle().fill(Theme.Palette.border).frame(height: 1)
+                SettingToggle(title: L("controllers.psAsXbox"), detail: L("controllers.psAsXbox.help"), isOn: $model.playStationAsXbox)
+            }
+            .padding(Theme.Spacing.md)
+            .background(Theme.Palette.card, in: RoundedRectangle(cornerRadius: Theme.Radius.lg))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.lg).strokeBorder(Theme.Palette.border))
+        }
+        .onAppear { model.refreshControllers() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            model.refreshControllers()
+        }
+    }
+}
+
+/// Settings › General: keep-awake while playing and the menu bar shortcut list.
+private struct MacIntegrationCard: View {
+    @Environment(AppModel.self) private var model
+    @Environment(Localizer.self) private var L
+
+    var body: some View {
+        @Bindable var model = model
+        VStack(alignment: .leading, spacing: 10) {
+            Text(L("mac.title")).font(Theme.Font.section).foregroundStyle(Theme.Palette.textPrimary)
+            VStack(alignment: .leading, spacing: 12) {
+                SettingToggle(title: L("mac.awake"), detail: L("mac.awake.help"), isOn: $model.keepsDisplayAwake)
+                Rectangle().fill(Theme.Palette.border).frame(height: 1)
+                SettingToggle(title: L("mac.menuBar"), detail: L("mac.menuBar.help"), isOn: $model.showsMenuBarItem)
+                if DiscordPresence.isAvailable {
+                    Rectangle().fill(Theme.Palette.border).frame(height: 1)
+                    SettingToggle(title: L("discord.setting"), detail: L("discord.setting.help"), isOn: $model.showsDiscordPresence)
+                }
+                Rectangle().fill(Theme.Palette.border).frame(height: 1)
+                Text(L("mac.shortcuts.help")).font(Theme.Font.caption).foregroundStyle(Theme.Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(Theme.Spacing.md)
+            .background(Theme.Palette.card, in: RoundedRectangle(cornerRadius: Theme.Radius.lg))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.lg).strokeBorder(Theme.Palette.border))
+        }
+    }
+}
+
+/// Settings › General: microphone access for games' voice chat. macOS asks on UniveGame's behalf, so allowing it
+/// here once covers every game started from the app.
+private struct MicrophoneCard: View {
+    @Environment(Localizer.self) private var L
+    @State private var status = AVCaptureDevice.authorizationStatus(for: .audio)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(L("mic.title")).font(Theme.Font.section).foregroundStyle(Theme.Palette.textPrimary)
+            HStack(spacing: Theme.Spacing.md) {
+                Image(systemName: status == .authorized ? "mic.fill" : "mic.slash")
+                    .foregroundStyle(status == .authorized ? Theme.Palette.success : Theme.Palette.textSecondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(L(statusKey)).font(Theme.Font.body).foregroundStyle(Theme.Palette.textPrimary)
+                    Text(L("mic.help")).font(Theme.Font.caption).foregroundStyle(Theme.Palette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                switch status {
+                case .notDetermined:
+                    Button(L("mic.allow")) {
+                        AVCaptureDevice.requestAccess(for: .audio) { _ in
+                            Task { @MainActor in status = AVCaptureDevice.authorizationStatus(for: .audio) }
+                        }
+                    }
+                    .buttonStyle(SecondaryButtonStyle(height: 34, horizontalPadding: 14))
+                case .denied, .restricted:
+                    Button(L("mic.openSettings")) {
+                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!)
+                    }
+                    .buttonStyle(SecondaryButtonStyle(height: 34, horizontalPadding: 14))
+                default:
+                    EmptyView()
+                }
+            }
+            .padding(Theme.Spacing.md)
+            .background(Theme.Palette.card, in: RoundedRectangle(cornerRadius: Theme.Radius.lg))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.lg).strokeBorder(Theme.Palette.border))
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            status = AVCaptureDevice.authorizationStatus(for: .audio)
+        }
+    }
+
+    private var statusKey: String {
+        switch status {
+        case .authorized: "mic.status.allowed"
+        case .denied, .restricted: "mic.status.denied"
+        default: "mic.status.notAsked"
+        }
+    }
+}
+
+// MARK: Engine
+
+private struct EngineSection: View {
+    @Environment(AppModel.self) private var model
+    @Environment(Localizer.self) private var L
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+            SectionTitle(text: L("settings.section.engine")).enterOnAppear()
+            card.enterOnAppear(delay: 0.06)
+            Text(L("settings.engine.help"))
+                .font(Theme.Font.caption).foregroundStyle(Theme.Palette.textSecondary)
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+                .enterOnAppear(delay: 0.12)
+            displayModesCard.enterOnAppear(delay: 0.14)
+            shaderCacheCard.enterOnAppear(delay: 0.16)
+        }
+        .task { await model.measureShaderCaches() }
+    }
+
+    private var displayModesCard: some View {
+        @Bindable var model = model
+        return SettingToggle(title: L("displayModes.title"), detail: L("displayModes.help"), isOn: $model.emulatesDisplayModes)
+            .padding(Theme.Spacing.md)
+            .background(Theme.Palette.card, in: RoundedRectangle(cornerRadius: Theme.Radius.lg))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.lg).strokeBorder(Theme.Palette.border))
+    }
+
+    private var shaderCacheCard: some View {
+        HStack(spacing: Theme.Spacing.md) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(L("shaders.title")).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.Palette.textPrimary)
+                Text(L("shaders.help")).font(Theme.Font.caption).foregroundStyle(Theme.Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            if let size = model.shaderCacheSize {
+                Text(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
+                    .font(Theme.Font.caption).monospacedDigit().foregroundStyle(Theme.Palette.textSecondary)
+            }
+            if model.clearingShaderCaches { ProgressView().controlSize(.small) }
+            Button(L("shaders.clear")) { Task { await model.clearShaderCaches() } }
+                .buttonStyle(SecondaryButtonStyle(height: 32, horizontalPadding: 12))
+                .disabled(model.clearingShaderCaches || !model.runningGameIDs.isEmpty || model.shaderCacheSize == 0)
+                .help(model.runningGameIDs.isEmpty ? "" : L("shaders.busy"))
+        }
+        .padding(Theme.Spacing.md)
+        .background(Theme.Palette.card, in: RoundedRectangle(cornerRadius: Theme.Radius.lg))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.lg).strokeBorder(Theme.Palette.border))
+    }
+
+    private var card: some View {
+        let engine = model.engines.first
+        return VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+            HStack(spacing: Theme.Spacing.md) {
+                Text(engine?.version ?? "—")
+                    .font(Theme.Font.display).monospacedDigit()
+                    .foregroundStyle(Theme.Palette.textPrimary)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        if model.engineInstall != nil {
+                            Circle().fill(Theme.Palette.accent).frame(width: 8, height: 8).pulsing()
+                            Text(L("d3dmetal.downloading")).foregroundStyle(Theme.Palette.textPrimary)
+                        } else if engine != nil || model.isDemo {
+                            Circle().fill(Theme.Palette.success).frame(width: 8, height: 8).pulsing()
+                            Text(L("d3dmetal.status.ready")).foregroundStyle(Theme.Palette.success)
+                        } else {
+                            Circle().fill(Theme.Palette.warning).frame(width: 8, height: 8)
+                            Text(L("engine.missing")).foregroundStyle(Theme.Palette.warning)
+                        }
+                    }
+                    .font(.system(size: 13, weight: .semibold))
+                    if let engine {
+                        Text("\(engine.info.wineDescription) · \(engine.info.backends.map { $0.uppercased() }.joined(separator: " · "))")
+                            .font(Theme.Font.caption).foregroundStyle(Theme.Palette.textSecondary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+                if model.engineInstall == nil {
+                    if engine == nil {
+                        Button(L("engine.download")) { model.startEngineInstall() }
+                            .buttonStyle(PrimaryButtonStyle(height: 34, horizontalPadding: 16))
+                            .disabled(model.isDemo)
+                    } else {
+                        Button(L("engine.update")) { model.startEngineInstall() }
+                            .buttonStyle(SecondaryButtonStyle(height: 34, horizontalPadding: 14))
+                            .disabled(model.isDemo)
+                    }
+                    Button(L("settings.rescan")) { model.reloadEngines() }
+                        .buttonStyle(SecondaryButtonStyle(height: 34, horizontalPadding: 14))
+                }
+            }
+            if let progress = model.engineInstall {
+                EngineProgressRow(progress: progress, showsCancel: true)
+            } else if model.engineCheckUpToDate {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark").font(.system(size: 11, weight: .bold))
+                    Text(L("engine.upToDate"))
+                }
+                .font(Theme.Font.caption).foregroundStyle(Theme.Palette.success)
+                .transition(.opacity)
+            }
+            if model.engines.count > 1 {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(model.engines.dropFirst(), id: \.version) { other in
+                        HStack(spacing: 8) {
+                            Text(L("settings.engineVersion", other.version)).font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Theme.Palette.textPrimary).monospacedDigit()
+                            Text(other.info.wineDescription).font(Theme.Font.caption).foregroundStyle(Theme.Palette.textSecondary)
+                            Spacer(minLength: 0)
+                            Text(other.info.backends.joined(separator: " · ").uppercased())
+                                .font(Theme.Font.mono).foregroundStyle(Theme.Palette.textSecondary)
+                        }
+                    }
+                }
+                .padding(.top, 4)
+                .overlay(alignment: .top) { Rectangle().fill(Theme.Palette.border).frame(height: 1).offset(y: -8) }
+            }
+        }
+        .padding(20)
+        .background(Theme.Palette.card, in: RoundedRectangle(cornerRadius: Theme.Radius.lg))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.lg).strokeBorder(Theme.Palette.border))
+    }
+}
+
+/// "Downloading · 182 / 290 MB · 40 s left" with a 6 pt meter.
+struct EngineProgressRow: View {
+    let progress: EngineInstallProgress
+    var showsCancel = false
+    @Environment(AppModel.self) private var model
+    @Environment(Localizer.self) private var L
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                HStack(spacing: 6) {
+                    Circle().fill(Theme.Palette.accent).frame(width: 8, height: 8).pulsing()
+                    Text(progress.phase == .downloading ? L("d3dmetal.downloading") : L("engine.phase.\(phaseKey)"))
+                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.Palette.textPrimary)
+                }
+                Spacer()
+                if let detail { Text(detail).font(Theme.Font.caption).foregroundStyle(Theme.Palette.textSecondary).monospacedDigit() }
+            }
+            if progress.phase == .downloading {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Theme.Palette.elevated)
+                        Capsule().fill(Theme.Palette.accent).frame(width: geo.size.width * progress.fraction)
+                            .animation(Theme.Motion.valueChange, value: progress.fraction)
+                    }
+                }
+                .frame(height: 6)
+            } else {
+                IndeterminateBar(height: 6)
+            }
+            if showsCancel && progress.phase == .downloading {
+                Button(L("common.cancel")) { model.cancelEngineInstall() }
+                    .buttonStyle(SecondaryButtonStyle(height: 30, horizontalPadding: 12))
+                    .font(.system(size: 12))
+            }
+        }
+        .enterOnAppear()
+    }
+
+    private var phaseKey: String {
+        switch progress.phase {
+        case .downloading: "downloading"
+        case .verifying: "verifying"
+        case .extracting: "extracting"
+        case .finishing: "finishing"
+        }
+    }
+
+    private var detail: String? {
+        guard progress.phase == .downloading, progress.totalBytes > 0 else { return nil }
+        let mb = Double(progress.totalBytes) / 1_048_576
+        let done = Int(mb * progress.fraction), total = Int(mb.rounded())
+        let left = progress.secondsLeft.map { Duration.seconds($0).formatted(.units(allowed: [.minutes, .seconds], width: .abbreviated, maximumUnitCount: 1)) } ?? "…"
+        return L("d3dmetal.progress", "\(done)", "\(total)", left)
+    }
+}
+
+// MARK: About
+
+private struct AboutSection: View {
+    @Environment(\.windowHeight) private var windowHeight
+    @Environment(AppModel.self) private var model
+    @Environment(Localizer.self) private var L
+    @Environment(\.locale) private var locale
+
+    var body: some View {
+        @Bindable var model = model
+        VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: Theme.Spacing.md) {
+                    if let icon = AppIcon.image {
+                        Image(nsImage: icon).resizable().interpolation(.high)
+                            .frame(width: 72, height: 72)
+                            .padding(-6)   // the icon carries Apple's transparent margin
+                            .accessibilityHidden(true)
+                    }
+                    Text(verbatim: "UniveGame").font(Theme.Font.display).foregroundStyle(Theme.Palette.textPrimary)
+                }
+                Text(L("settings.about.version", Self.version)).font(Theme.Font.body).foregroundStyle(Theme.Palette.textSecondary)
+                Text(L("settings.about.text")).font(Theme.Font.caption).foregroundStyle(Theme.Palette.textTertiary)
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 8)
+            }
+            .enterOnAppear()
+            UpdateCard().enterOnAppear(delay: 0.06)
+            legalCard.enterOnAppear(delay: 0.1)
+        }
+        .sheet(isPresented: $model.reviewingDisclaimer) {
+            DisclaimerView(mode: .review, windowHeight: windowHeight)
+        }
+    }
+
+    /// The accepted disclaimer, with a way to read it again.
+    private var legalCard: some View {
+        HStack(spacing: Theme.Spacing.md) {
+            Image(systemName: "doc.text")
+                .font(.system(size: 17))
+                .foregroundStyle(Theme.Palette.textPrimary)
+                .frame(width: 40, height: 40)
+                .background(Theme.Palette.elevated, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(L("settings.legal")).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.Palette.textPrimary)
+                if let date = model.disclaimerAcceptedAt {
+                    HStack(spacing: 5) {
+                        Image(systemName: "checkmark.circle.fill").font(.system(size: 11)).foregroundStyle(Theme.Palette.success)
+                        Text(L("disclaimer.acceptedOn", date.formatted(Date.FormatStyle(date: .long, time: .shortened).locale(L.locale))))
+                    }
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                }
+            }
+            Spacer(minLength: 0)
+            Button(L("disclaimer.reread")) { model.reviewingDisclaimer = true }
+                .buttonStyle(SecondaryButtonStyle(height: 34, horizontalPadding: 14))
+        }
+        .padding(Theme.Spacing.md)
+        .background(Theme.Palette.card, in: RoundedRectangle(cornerRadius: Theme.Radius.lg))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.lg).strokeBorder(Theme.Palette.border))
+    }
+
+    static var version: String { AppModel.appVersion }
+}
+
+/// Settings › About: checks GitHub for a newer UniveGame and installs it after verifying it.
+private struct UpdateCard: View {
+    @Environment(AppModel.self) private var model
+    @Environment(Localizer.self) private var L
+
+    var body: some View {
+        @Bindable var model = model
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: Theme.Spacing.md) {
+                Image(systemName: model.availableUpdate == nil ? "arrow.triangle.2.circlepath" : "arrow.down.circle")
+                    .font(.system(size: 17))
+                    .foregroundStyle(model.availableUpdate == nil ? Theme.Palette.textPrimary : Theme.Palette.accent)
+                    .frame(width: 40, height: 40)
+                    .background(Theme.Palette.elevated, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.Palette.textPrimary)
+                    Text(subtitle).font(Theme.Font.caption).foregroundStyle(Theme.Palette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                actions
+            }
+            if let phase = model.updatePhase { progress(phase) }
+            if let update = model.availableUpdate, model.updatePhase == nil, !update.notes.isEmpty {
+                ScrollView {
+                    Text(Self.notes(update.notes))
+                        .font(Theme.Font.caption).foregroundStyle(Theme.Palette.textSecondary)
+                        .lineSpacing(3)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 160)
+                .padding(12)
+                .background(Theme.Palette.background, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+            }
+            if let error = model.updateError {
+                Label {
+                    Text(L("update.error.\(error.key)") + (error.detail.isEmpty ? "" : " (\(error.detail))"))
+                        .fixedSize(horizontal: false, vertical: true)
+                } icon: { Image(systemName: "exclamationmark.triangle.fill") }
+                .font(Theme.Font.caption)
+                .foregroundStyle(error == .notWritable ? Theme.Palette.warning : Theme.Palette.destructive)
+            }
+            if model.availableUpdate != nil, model.updatePhase == nil, model.updateBlockedByActivity {
+                Text(L("update.busy")).font(Theme.Font.caption).foregroundStyle(Theme.Palette.warning)
+            }
+            Rectangle().fill(Theme.Palette.border).frame(height: 1)
+            SettingToggle(title: L("update.auto"), detail: L("update.trust"), isOn: $model.checksForUpdates)
+        }
+        .padding(Theme.Spacing.md)
+        .background(Theme.Palette.card, in: RoundedRectangle(cornerRadius: Theme.Radius.lg))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.lg).strokeBorder(Theme.Palette.border))
+        .animation(Theme.Motion.quick, value: model.updatePhase)
+        .animation(Theme.Motion.quick, value: model.availableUpdate)
+    }
+
+    private var title: String {
+        if let update = model.availableUpdate { return L("update.available", update.version) }
+        return L("update.title")
+    }
+
+    private var subtitle: String {
+        if model.checkingForUpdate { return L("update.checking") }
+        if model.availableUpdate != nil { return L("update.availableDetail", AboutSection.version) }
+        guard let date = model.lastUpdateCheck else { return L("update.never") }
+        let when = date.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened).locale(L.locale))
+        return model.checkedForUpdateThisRun ? L("update.upToDate", AboutSection.version, when)
+            : L("update.lastChecked", AboutSection.version, when)
+    }
+
+    @ViewBuilder private var actions: some View {
+        if let phase = model.updatePhase {
+            if case .downloading = phase {
+                Button(L("common.cancel")) { model.cancelAppUpdate() }
+                    .buttonStyle(SecondaryButtonStyle(height: 34, horizontalPadding: 14))
+            }
+        } else if let update = model.availableUpdate {
+            HStack(spacing: 8) {
+                Button(L("update.notes")) { NSWorkspace.shared.open(update.page) }
+                    .buttonStyle(SecondaryButtonStyle(height: 34, horizontalPadding: 14))
+                Button(L("update.install")) { model.startAppUpdate() }
+                    .buttonStyle(PrimaryButtonStyle(height: 34, horizontalPadding: 16))
+                    .disabled(model.updateBlockedByActivity)
+            }
+        } else {
+            HStack(spacing: 8) {
+                if model.checkingForUpdate { ProgressView().controlSize(.small) }
+                Button(L("update.check")) { Task { await model.checkForUpdate() } }
+                    .buttonStyle(SecondaryButtonStyle(height: 34, horizontalPadding: 14))
+                    .disabled(model.checkingForUpdate || model.isDemo)
+            }
+        }
+    }
+
+    @ViewBuilder private func progress(_ phase: AppUpdatePhase) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Circle().fill(Theme.Palette.accent).frame(width: 8, height: 8).pulsing()
+                Text(phaseText(phase)).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.Palette.textPrimary)
+                Spacer(minLength: 0)
+                if case .downloading(let f) = phase, let update = model.availableUpdate {
+                    let mb = Double(update.size) / 1_048_576
+                    Text(verbatim: String(format: "%.1f / %.1f MB", mb * f, mb))
+                        .font(Theme.Font.caption).foregroundStyle(Theme.Palette.textSecondary).monospacedDigit()
+                }
+            }
+            if case .downloading(let f) = phase {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Theme.Palette.elevated)
+                        Capsule().fill(Theme.Palette.accent).frame(width: geo.size.width * f)
+                    }
+                }
+                .frame(height: 6)
+            } else {
+                IndeterminateBar(height: 6)
+            }
+        }
+    }
+
+    private func phaseText(_ phase: AppUpdatePhase) -> String {
+        switch phase {
+        case .downloading: L("update.phase.downloading")
+        case .verifying: L("update.phase.verifying")
+        case .installing: L("update.phase.installing")
+        }
+    }
+
+    /// Release notes are Markdown: inline styling, headings as plain lines and list items as bullets.
+    static func notes(_ markdown: String) -> AttributedString {
+        let lines = markdown.replacingOccurrences(of: "\r\n", with: "\n").split(separator: "\n", omittingEmptySubsequences: false).map { line in
+            let trimmed = line.drop { $0 == " " }
+            if trimmed.hasPrefix("#") { return String(trimmed.drop { $0 == "#" }.drop { $0 == " " }) }
+            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") { return "•  " + trimmed.dropFirst(2) }
+            return String(line)
+        }
+        let text = lines.joined(separator: "\n")
+        return (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+            ?? AttributedString(text)
+    }
+}

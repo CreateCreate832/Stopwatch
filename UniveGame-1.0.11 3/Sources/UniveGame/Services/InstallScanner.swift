@@ -1,0 +1,170 @@
+import Foundation
+
+/// Finds what an installer put on the bottle's C: drive by comparing .exe files before and after,
+/// and guesses which one starts the game.
+struct ExeCandidate: Identifiable, Hashable {
+    let url: URL
+    let windowsPath: String
+    let size: Int64
+    let score: Int
+
+    var id: URL { url }
+    var name: String { url.lastPathComponent }
+}
+
+struct InstallScanResult: Equatable {
+    var candidates: [ExeCandidate]
+    var installDirectory: URL?
+    var uninstaller: URL?
+}
+
+enum InstallScanner {
+    struct FileStamp: Equatable { let size: Int64; let modified: Date }
+    typealias Snapshot = [String: FileStamp]   // keyed by absolute path
+
+    /// Helpers that ship next to games but never start them.
+    static let excludedNames = [
+        "unins", "uninstall", "setup", "install", "redist", "vcredist", "vc_redist", "dxsetup", "dxwebsetup",
+        "crashreport", "crashhandler", "crashpad", "unitycrashhandler", "cefsharp.browsersubprocess",
+        "qtwebengineprocess", "notification_helper", "prereq", "dotnet", "ue4prereqsetup", "easyanticheat_setup",
+        // dedicated servers and modding tools that ship with games
+        "hlds", "hltv", "srcds", "dedicatedserver", "steambackup", "amxxpc", "wincsx", "compile",
+    ]
+
+    /// Folders Windows itself owns; installers don't put games there.
+    static let systemFolders: Set<String> = ["windows", "programdata/microsoft", "program files/common files",
+                                              "program files (x86)/common files", "program files/internet explorer",
+                                              "program files (x86)/internet explorer", "program files/windows nt",
+                                              "program files (x86)/windows nt", "program files/windows media player",
+                                              "program files (x86)/windows media player"]
+
+    static func snapshot(driveC: URL) -> Snapshot {
+        let driveC = driveC.resolvingSymlinksInPath() // the enumerator doesn't descend into a symlinked root
+        var result: Snapshot = [:]
+        let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey]
+        guard let walker = FileManager.default.enumerator(at: driveC, includingPropertiesForKeys: keys,
+                                                          options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [:] }
+        for case let url as URL in walker {
+            let relative = relativePath(of: url, in: driveC).lowercased()
+            let values = try? url.resourceValues(forKeys: Set(keys))
+            if values?.isDirectory == true {
+                if systemFolders.contains(relative) || relative.hasSuffix("/temp") { walker.skipDescendants() }
+                continue
+            }
+            guard url.pathExtension.lowercased() == "exe" else { continue }
+            result[url.resolvingSymlinksInPath().path] = FileStamp(size: Int64(values?.fileSize ?? 0),
+                                                            modified: values?.contentModificationDate ?? .distantPast)
+        }
+        return result
+    }
+
+    /// New or changed executables, ranked best first. Empty when the installer added nothing: programs
+    /// that were already there (an earlier game in the same environment) are never offered as its result.
+    static func scan(before: Snapshot, after: Snapshot, driveC: URL) -> InstallScanResult {
+        // Compare real paths: /tmp vs /private/tmp (or a symlinked home) must not split one folder in two.
+        let driveC = driveC.resolvingSymlinksInPath()
+        let changed = after.filter { before[$0.key] != $0.value }.map(\.key)
+        let urls = changed.map { URL(fileURLWithPath: $0) }
+        let root = installRoot(of: urls, driveC: driveC)
+
+        let candidates = urls.map { url in
+            ExeCandidate(url: url, windowsPath: windowsPath(of: url, driveC: driveC),
+                         size: after[url.path]?.size ?? 0, score: score(url, root: root, size: after[url.path]?.size ?? 0))
+        }
+        .filter { $0.score > -100 }
+        .sorted { $0.score != $1.score ? $0.score > $1.score : $0.windowsPath < $1.windowsPath }
+
+        let uninstaller = urls.first { url in
+            url.lastPathComponent.lowercased().hasPrefix("unins") && (root.map { url.path.hasPrefix($0.path) } ?? true)
+        }
+        return InstallScanResult(candidates: candidates, installDirectory: root, uninstaller: uninstaller)
+    }
+
+    /// The game's own folder: the deepest folder shared by the new programs in the place most of them went
+    /// (`C:\Games\S2Rebirth`, `C:\Program Files\Studio\Game`). Never a folder other software shares, such as
+    /// `C:\Program Files`, `C:\GOG Games` or a Windows user's profile: uninstalling may move this folder to the Trash.
+    static func installRoot(of urls: [URL], driveC: URL) -> URL? {
+        let groups = Dictionary(grouping: urls.compactMap { url -> (String, [String])? in
+            let dirs = relativePath(of: url, in: driveC).split(separator: "/").map(String.init).dropLast()
+            guard let top = dirs.first else { return nil }
+            return (top.lowercased(), Array(dirs))
+        }, by: { $0.0 })
+        guard let best = groups.max(by: { $0.value.count != $1.value.count ? $0.value.count < $1.value.count : $0.key > $1.key })
+        else { return nil }
+        var common = best.value[0].1
+        for (_, dirs) in best.value.dropFirst() {
+            common = Array(zip(common, dirs).prefix { $0.lowercased() == $1.lowercased() }.map(\.0))
+        }
+        guard !common.isEmpty, !isSharedFolder(common) else { return nil }
+        return driveC.appendingPathComponent(common.joined(separator: "/"), isDirectory: true)
+    }
+
+    /// Folders that hold more than one program's files.
+    static func isSharedFolder(_ components: [String]) -> Bool {
+        let c = components.map { $0.lowercased() }
+        let topLevel: Set = ["games", "program files", "program files (x86)", "programdata", "gog games", "windows", "users"]
+        if c.count == 1 { return topLevel.contains(c[0]) }
+        if c[0] == "windows" { return true }
+        guard c[0] == "users" else { return false }
+        // users/<name>, users/<name>/AppData[/Local|Roaming|LocalLow], users/<name>/Documents|Desktop|Saved Games…
+        if c.count == 2 { return true }
+        if c.count == 3 { return true }
+        if c.count == 4, c[2] == "appdata" { return true }
+        if c.count == 4, c[2] == "documents", c[3] == "my games" { return true }
+        return false
+    }
+
+    static func score(_ url: URL, root: URL?, size: Int64) -> Int {
+        let name = url.deletingPathExtension().lastPathComponent.lowercased()
+        if excludedNames.contains(where: { name.contains($0) }) { return -1000 }
+        var score = 0
+        // A launcher usually has to start the game (it passes sign-in or update checks), so it wins.
+        if name.contains("launcher") { score += 70 }
+        if let root {
+            guard url.path.hasPrefix(root.path) else { return score - 40 }
+            let folder = normalized(root.lastPathComponent)
+            let file = normalized(name)
+            if !folder.isEmpty, file.contains(folder) || folder.contains(file) { score += 40 }
+            let depth = url.deletingLastPathComponent().pathComponents.count - root.pathComponents.count
+            score += max(0, 20 - depth * 8)
+        }
+        if size > 0 { score += min(20, Int(log2(Double(size) / 1_000_000 + 1) * 3)) } // bigger binaries lean game
+        return score
+    }
+
+    /// Launch options a program needs to start the game rather than a menu or another game. GoldSrc games
+    /// (Counter-Strike 1.6, Day of Defeat…) start through `hl.exe` with `-game <mod folder>`.
+    static func defaultArguments(for exe: URL) -> [String] {
+        guard exe.lastPathComponent.lowercased() == "hl.exe" else { return [] }
+        let folder = exe.deletingLastPathComponent()
+        let mods = ["cstrike", "czero", "dod", "tfc", "dmc", "ricochet", "gearbox", "bshift"]
+        let present = mods.filter { FileManager.default.fileExists(atPath: folder.appendingPathComponent($0).path) }
+        return present.first.map { ["-game", $0] } ?? []
+    }
+
+    static func windowsPath(of url: URL, driveC: URL) -> String {
+        "C:\\" + relativePath(of: url, in: driveC).replacingOccurrences(of: "/", with: "\\")
+    }
+
+    static func relativePath(of url: URL, in base: URL) -> String {
+        let path = url.resolvingSymlinksInPath().path, basePath = base.resolvingSymlinksInPath().path
+        guard path.hasPrefix(basePath) else { return path }
+        return String(path.dropFirst(basePath.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    /// "S2_Rebirth-Launcher" → "s2rebirthlauncher", for loose name matching.
+    static func normalized(_ s: String) -> String {
+        s.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    /// "S2Rebirth" → "S2 Rebirth": a readable default title from a folder name.
+    static func displayTitle(fromFolder folder: String) -> String {
+        var out = ""
+        let chars = Array(folder.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " "))
+        for (i, c) in chars.enumerated() {
+            if i > 0, c.isUppercase, chars[i - 1].isLowercase || chars[i - 1].isNumber, chars[i - 1] != " " { out.append(" ") }
+            out.append(c)
+        }
+        return out.split(separator: " ").joined(separator: " ")
+    }
+}
