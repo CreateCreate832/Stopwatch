@@ -1,0 +1,34 @@
+
+name: Build Stopwatch DMG
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Download source code
+        uses: actions/checkout@v4
+
+      - name: Build Stopwatch
+        run: |
+          chmod +x scripts/bundle.sh
+          scripts/bundle.sh debug
+
+      - name: Create DMG
+        run: |
+          hdiutil create \
+            -volname "Stopwatch" \
+            -srcfolder build/Stopwatch.app \
+            -ov -format UDZO \
+            Stopwatch.dmg
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: Stopwatch-DMG
+          path: Stopwatch.dmg
